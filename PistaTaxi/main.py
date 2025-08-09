@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
+import requests # Importando a biblioteca requests
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.boxlayout import BoxLayout
@@ -14,23 +15,32 @@ from kivy.core.window import Window
 from kivy.uix.floatlayout import FloatLayout
 from kivy.core.text import Label as CoreLabel
 from kivy.utils import platform
+from kivy.clock import Clock
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import Paragraph
 from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.colors import black, red, yellow, grey
+from reportlab.lib.colors import black, red, yellow, grey, blue
 from plyer import filechooser
+from kivy.uix.popup import Popup
+from functools import partial
+
+# Define fundo branco antes de qualquer coisa para evitar tela preta inicial
+Window.clearcolor = (1, 1, 1, 1)
 
 def resource_path(filename):
-    """Retorna o caminho correto do arquivo para rodar dentro do exe ou no desenvolvimento."""
+    """
+    Retorna o caminho correto do arquivo para rodar dentro do exe ou no desenvolvimento.
+    Usa o diretório do script para garantir que o caminho seja sempre o correto.
+    """
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, filename)
-    return os.path.join(os.path.abspath("."), filename)
+    
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
-# Configurações da janela
-Window.size = (360, 640)
+# A linha Window.size foi removida para permitir que a janela abra maximizada.
 Window.title = "Demarcação de Pista para Verificação de Taxímetro"
 
 def criar_titulo():
@@ -44,6 +54,28 @@ def criar_titulo():
         halign='center',
         valign='middle'
     )
+
+class TelaSplash(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = FloatLayout()
+
+        # Fundo branco
+        with self.canvas.before:
+            Color(1, 1, 1, 1)
+            self.rect = Rectangle(size=Window.size, pos=self.pos)
+        self.bind(size=self._update_rect, pos=self._update_rect)
+
+        img = Image(source=resource_path('splash.png'), allow_stretch=True, keep_ratio=True,
+                    size_hint=(0.3, 0.3), 
+                    pos_hint={'center_x': 0.5, 'center_y': 0.5})
+        layout.add_widget(img)
+        self.add_widget(layout)
+
+    def _update_rect(self, instance, value):
+        self.rect.pos = instance.pos
+        self.rect.size = instance.size
+
 
 class TelaInicial(Screen):
     def __init__(self, **kwargs):
@@ -98,6 +130,7 @@ class TelaEntradaDados(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.layout = BoxLayout(orientation='vertical', padding=15, spacing=8)
+        self.endereco = "" # Armazena o endereço para o PDF
 
         # Fundo branco
         with self.canvas.before:
@@ -143,14 +176,35 @@ class TelaEntradaDados(Screen):
         grid.add_widget(self.entrada_comprimento_fracao2)
 
         self.layout.add_widget(grid)
+        
+        # Novo campo de texto para o endereço
+        self.entrada_endereco = TextInput(hint_text='Endereço (opcional)', multiline=False, size_hint=(1, 0.08))
+        self.layout.add_widget(self.entrada_endereco)
+
+        # Botão Localizador de CEP
+        self.botao_cep = Button(text="Localizar CEP", size_hint=(1, 0.08), background_color=(0.1, 0.5, 0.8, 1), color=(1,1,1,1))
+        self.botao_cep.bind(on_release=self.show_cep_popup)
+        self.layout.add_widget(self.botao_cep)
 
         self.botao_calcular = Button(text="Calcular", size_hint=(1, 0.08), background_color=(0, 0.6, 0.3, 1), color=(1,1,1,1))
         self.botao_calcular.bind(on_release=self.calcular_tolerancia)
         self.layout.add_widget(self.botao_calcular)
-
-        self.resultado_label = Label(text="", halign="center", valign="middle", size_hint=(1, 0.2), markup=True, color=(0,0,0,1))
-        self.layout.add_widget(self.resultado_label)
-
+        
+        # Layout para os resultados lado a lado
+        self.resultados_layout = GridLayout(cols=2, spacing=10, size_hint=(1, 0.2))
+        
+        # Labels para os títulos das colunas de resultado
+        self.resultados_layout.add_widget(Label(text="[b]Resultados Bandeira 1[/b]", markup=True, color=(0,0,0,1)))
+        self.resultados_layout.add_widget(Label(text="[b]Resultados Bandeira 2[/b]", markup=True, color=(0,0,0,1)))
+        
+        # Labels separadas para os resultados
+        self.resultado_label1 = Label(text="", halign="center", valign="middle", markup=True, color=(0,0,0,1))
+        self.resultado_label2 = Label(text="", halign="center", valign="middle", markup=True, color=(0,0,0,1))
+        
+        self.resultados_layout.add_widget(self.resultado_label1)
+        self.resultados_layout.add_widget(self.resultado_label2)
+        self.layout.add_widget(self.resultados_layout)
+        
         botoes_finais = BoxLayout(size_hint=(0.8, 0.08), spacing=5, pos_hint={'center_x': 0.5})
 
         self.botao_visualizar1 = Button(text="Pista 1", disabled=True, background_color=(0.2, 0.5, 0.8, 1), color=(1,1,1,1))
@@ -177,7 +231,51 @@ class TelaEntradaDados(Screen):
         self.rect.pos = instance.pos
         self.rect.size = instance.size
 
+    def show_cep_popup(self, *args):
+        content = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        
+        self.cep_input = TextInput(hint_text='Digite o CEP (apenas números)', multiline=False, input_filter='int')
+        content.add_widget(self.cep_input)
+        
+        ok_button = Button(text='Buscar Endereço', size_hint=(1, 0.2))
+        content.add_widget(ok_button)
+        
+        popup = Popup(title='Localizar CEP', content=content, size_hint=(0.7, 0.4))
+        ok_button.bind(on_release=partial(self.buscar_endereco, popup))
+        
+        popup.open()
+
+    def buscar_endereco(self, popup, *args):
+        cep = self.cep_input.text
+        if len(cep) == 8:
+            try:
+                response = requests.get(f"https://viacep.com.br/ws/{cep}/json/")
+                data = response.json()
+                if 'erro' not in data:
+                    self.endereco = f"{data['logradouro']}, {data['bairro']}, {data['localidade']} - {data['uf']}"
+                    self.entrada_endereco.text = self.endereco
+                    self.resultado_label1.text = f"[color=008000]CEP encontrado com sucesso![/color]"
+                    self.resultado_label2.text = f"[color=008000]CEP encontrado com sucesso![/color]"
+                else:
+                    self.endereco = ""
+                    self.entrada_endereco.text = ""
+                    self.resultado_label1.text = "[color=ff0000]CEP não encontrado.[/color]"
+                    self.resultado_label2.text = "[color=ff0000]CEP não encontrado.[/color]"
+            except Exception as e:
+                self.endereco = ""
+                self.entrada_endereco.text = ""
+                self.resultado_label1.text = f"[color=ff0000]Erro na busca do CEP: {e}[/color]"
+                self.resultado_label2.text = f"[color=ff0000]Erro na busca do CEP: {e}[/color]"
+        else:
+            self.resultado_label1.text = "[color=ff0000]CEP inválido.[/color]"
+            self.resultado_label2.text = "[color=ff0000]CEP inválido.[/color]"
+            self.endereco = ""
+            self.entrada_endereco.text = ""
+        
+        popup.dismiss()
+
     def calcular_tolerancia(self, *args):
+        # ... (código existente) ...
         try:
             self.bandeirada1 = float(self.entrada_bandeirada1.text)
             self.valor_fracao1 = float(self.entrada_valor_faccao1.text)
@@ -194,22 +292,27 @@ class TelaEntradaDados(Screen):
             self.comprimento_pista2 = self.num_fracoes2 * self.comprimento_fracao2
             self.tarifa_estimativa2 = self.bandeirada2 + self.num_fracoes2 * self.valor_fracao2
             self.tolerancia_metros2 = self.comprimento_pista2 * 0.02
+            
+            # Atualiza a variável de endereço caso o usuário a tenha digitado manualmente
+            self.endereco = self.entrada_endereco.text if self.entrada_endereco.text else ""
 
-            self.resultado_label.text = (
-                "[b]Resultados Bandeira 1:[/b]\n"
-                f"Comprimento da pista: {self.comprimento_pista1:.2f} m\n"
+            self.resultado_label1.text = (
+                f"Comp. da pista: {self.comprimento_pista1:.2f} m\n"
                 f"Tarifa estimada: R$ {self.tarifa_estimativa1:.2f}\n"
-                f"Tolerância permitida: ± {self.tolerancia_metros1:.2f} m\n"
-                "[b]Resultados Bandeira 2:[/b]\n"
-                f"Comprimento da pista: {self.comprimento_pista2:.2f} m\n"
+                f"Tolerância permitida: ± {self.tolerancia_metros1:.2f} m"
+            )
+            self.resultado_label2.text = (
+                f"Comp. da pista: {self.comprimento_pista2:.2f} m\n"
                 f"Tarifa estimada: R$ {self.tarifa_estimativa2:.2f}\n"
                 f"Tolerância permitida: ± {self.tolerancia_metros2:.2f} m"
             )
+
             self.botao_visualizar1.disabled = False
             self.botao_visualizar2.disabled = False
             self.botao_gerar_pdf.disabled = False
         except Exception as e:
-            self.resultado_label.text = f"[color=ff0000]Erro nos dados inseridos.[/color]\n{e}"
+            self.resultado_label1.text = f"[color=ff0000]Erro nos dados.[/color]"
+            self.resultado_label2.text = f"[color=ff0000]Erro nos dados.[/color]"
             self.botao_visualizar1.disabled = True
             self.botao_visualizar2.disabled = True
             self.botao_gerar_pdf.disabled = True
@@ -243,22 +346,27 @@ class TelaEntradaDados(Screen):
 
     def gerar_pdf_report(self, *args):
         try:
+            # Garante que o endereço digitado manualmente seja salvo
+            self.endereco = self.entrada_endereco.text if self.entrada_endereco.text else ""
+            
             file_path = filechooser.save_file(
                 title='Salvar Relatório PDF',
                 filters=[('PDF Documents', '*.pdf')],
-                # path=os.path.expanduser("~")  # opcional
             )
 
             if file_path:
                 if isinstance(file_path, (list, tuple)):
                     file_path = file_path[0]
                 self.gerar_pdf(file_path)
-                self.resultado_label.text = f"[color=008000]Relatório salvo em:[/color]\n[size=12]{file_path}[/size]"
+                self.resultado_label1.text = f"[color=008000]Relatório salvo em:[/color]\n[size=12]{file_path}[/size]"
+                self.resultado_label2.text = f"[color=008000]Relatório salvo em:[/color]\n[size=12]{file_path}[/size]"
             else:
-                self.resultado_label.text = "[color=ff8c00]Geração de PDF cancelada.[/color]"
+                self.resultado_label1.text = "[color=ff8c00]Geração de PDF cancelada.[/color]"
+                self.resultado_label2.text = "[color=ff8c00]Geração de PDF cancelada.[/color]"
 
         except Exception as e:
-            self.resultado_label.text = f"[color=ff0000]Erro ao salvar o PDF: {e}[/color]"
+            self.resultado_label1.text = f"[color=ff0000]Erro ao salvar o PDF: {e}[/color]"
+            self.resultado_label2.text = f"[color=ff0000]Erro ao salvar o PDF: {e}[/color]"
 
     def gerar_pdf(self, caminho_pdf):
         c = canvas.Canvas(caminho_pdf, pagesize=A4)
@@ -266,98 +374,180 @@ class TelaEntradaDados(Screen):
         margem_esq = 2 * cm
         comprimento_px = 12 * cm
         altura_pista = 20
+        line_thickness = 1.5
+        margem_coluna = 10 * cm
+
+        def desenhar_elementos_fixos(canvas_obj):
+            logo_path = resource_path('ibametro.png')
+            if not os.path.exists(logo_path):
+                print(f"Erro: O arquivo de imagem '{logo_path}' não foi encontrado.")
+                self.mostrar_erro_imagem(f"Erro: Imagem 'ibametro.png' não encontrada.")
+                return False
+
+            try:
+                canvas_obj.setFillAlpha(0.08)  # Opacidade muito baixa
+                largura_watermark = 16 * cm
+                altura_watermark = 8.5 * cm 
+                pos_x = (largura - largura_watermark) / 2
+                pos_y = (altura - altura_watermark) / 2
+                canvas_obj.drawImage(logo_path, pos_x, pos_y, width=largura_watermark, height=altura_watermark, mask='auto')
+                canvas_obj.setFillAlpha(1)  # Restaura a opacidade
+            except Exception as e:
+                print(f"Erro ao desenhar marca d'água: {e}")
+                self.mostrar_erro_imagem(f"Erro ao desenhar marca d'água: {e}")
+                return False
+
+            try:
+                canvas_obj.setFillAlpha(1) # Opacidade normal
+                largura_logo = 3 * cm
+                altura_logo = 1.6 * cm
+                pos_x_logo = largura - largura_logo - cm
+                pos_y_logo = altura - altura_logo - cm
+                canvas_obj.drawImage(logo_path, pos_x_logo, pos_y_logo, width=largura_logo, height=altura_logo, mask='auto')
+            except Exception as e:
+                print(f"Erro ao desenhar logo: {e}")
+                self.mostrar_erro_imagem(f"Erro ao desenhar logo: {e}")
+                return False
+            
+            return True
+
+        if not desenhar_elementos_fixos(c):
+            return 
 
         def desenhar_pista(y_top, titulo, bandeirada, valor_fracao, comprimento_pista,
                            comprimento_fracao, num_fracoes, tarifa_estimativa, tolerancia):
-            espacamento_texto = 18
-
+            # Título da Bandeira
             c.setFont("Helvetica-Bold", 14)
             c.drawString(margem_esq, y_top, titulo)
-            y = y_top - espacamento_texto
+            
+            y = y_top - 1.5 * cm
 
-            c.setFont("Helvetica", 12)
-            c.drawString(margem_esq, y, f"Bandeirada: R$ {bandeirada:.2f}")
-            y -= espacamento_texto
-            c.drawString(margem_esq, y, f"Valor por fração: R$ {valor_fracao:.2f}")
-            y -= espacamento_texto
-            c.drawString(margem_esq, y, f"Número de frações: {num_fracoes}")
-            y -= espacamento_texto
-            c.drawString(margem_esq, y, f"Comprimento da fração: {comprimento_fracao:.2f} m")
-            y -= espacamento_texto
-            c.drawString(margem_esq, y, f"Comprimento da pista: {comprimento_pista:.2f} m")
-            y -= espacamento_texto
-            c.drawString(margem_esq, y, f"Tarifa estimada: R$ {tarifa_estimativa:.2f}")
-            y -= espacamento_texto
-            c.drawString(margem_esq, y, f"Tolerância permitida: ± {tolerancia:.2f} m")
-
-            y_pista = y - 50
+            # Fórmulas
+            c.setFont("Helvetica", 10)
+            c.setFillColor(black)
+            c.drawCentredString(margem_esq + comprimento_px / 2, y, f"Comp. da pista = {num_fracoes} × {comprimento_pista / num_fracoes:.2f}")
+            c.drawCentredString(margem_esq + comprimento_px / 2, y - 0.5 * cm, f"Tarifa estimada = {bandeirada:.2f} + {num_fracoes} × {valor_fracao:.2f}")
+            
+            y_cota = y - 1.5 * cm
             x_ini = margem_esq
+            
+            # Cota de Comprimento Total (ACIMA das fórmulas)
+            c.setStrokeColor(red)
+            c.setLineWidth(line_thickness)
+            c.line(x_ini, y_cota, x_ini + comprimento_px, y_cota)
+            c.line(x_ini, y_cota - 0.15 * cm, x_ini, y_cota + 0.15 * cm)
+            c.line(x_ini + comprimento_px, y_cota - 0.15 * cm, x_ini + comprimento_px, y_cota + 0.15 * cm)
+            c.setFont("Helvetica", 10)
+            c.setFillColor(black)
+            c.drawCentredString(x_ini + comprimento_px / 2, y_cota + 0.2 * cm, f"{comprimento_pista:.2f} m")
+            
+            y_pista = y_cota - 2 * cm
 
+            # Desenho da Pista
             c.setFillColor(grey)
             c.rect(x_ini, y_pista, comprimento_px, altura_pista, fill=1)
             c.setStrokeColor(yellow)
-            c.setLineWidth(1.5)
+            c.setLineWidth(line_thickness)
             c.line(x_ini, y_pista + 5, x_ini + comprimento_px, y_pista + 5)
             c.line(x_ini, y_pista + 15, x_ini + comprimento_px, y_pista + 15)
             c.setStrokeColor(black)
-            c.setLineWidth(2)
+            c.setLineWidth(line_thickness)
             c.line(x_ini, y_pista + 10, x_ini + comprimento_px, y_pista + 10)
 
-            c.setStrokeColor(red)
-            y_cota = y_pista + 30
-            c.line(x_ini, y_cota, x_ini + comprimento_px, y_cota)
-            c.line(x_ini, y_cota - 3, x_ini, y_cota + 3)
-            c.line(x_ini + comprimento_px, y_cota - 3, x_ini + comprimento_px, y_cota + 3)
-            c.setFont("Helvetica", 10)
-            c.drawCentredString(x_ini + comprimento_px / 2, y_cota + 5, f"{comprimento_pista:.2f} m")
-
+            # Cota de Tolerância (POSICIONADA NAS EXTREMIDADES DIREITAS DA PISTA)
             tol_px = (tolerancia / comprimento_pista) * comprimento_px if comprimento_pista else 0
-            x_centro = x_ini + comprimento_px / 2
-            y_tol = y_pista - 15
-            c.line(x_centro - tol_px, y_tol, x_centro + tol_px, y_tol)
-            c.line(x_centro - tol_px, y_tol - 3, x_centro - tol_px, y_tol + 3)
-            c.line(x_centro + tol_px, y_tol - 3, x_centro + tol_px, y_tol + 3)
-            c.drawCentredString(x_centro, y_tol - 10, f"± {tolerancia:.2f} m")
-
-            y_formula_base = y_tol - 30
+            x_final = x_ini + comprimento_px
+            x_tol_neg = x_final - tol_px
+            x_tol_pos = x_final + tol_px
+            y_tol_linha = y_pista + 10
+            
+            c.setStrokeColor(blue)
+            c.setLineWidth(line_thickness)
+            c.line(x_tol_neg, y_tol_linha, x_tol_pos, y_tol_linha)
+            c.line(x_tol_neg, y_tol_linha - 5, x_tol_neg, y_tol_linha + 5)
+            c.line(x_tol_pos, y_tol_linha - 5, x_tol_pos, y_tol_linha + 5)
             c.setFont("Helvetica", 10)
             c.setFillColor(black)
-            c.drawCentredString(x_centro, y_formula_base + 10, "Comp. da pista = Nº de frações × Comp. da fração")
-            c.drawCentredString(x_centro, y_formula_base - 5, f"Tarifa estimada = {bandeirada:.2f} + {num_fracoes} x {valor_fracao:.2f}")
+            
+            y_tol_text = y_pista - 0.5 * cm
+            
+            text_neg = f"-{tolerancia:.1f} m"
+            text_pos = f"+{tolerancia:.1f} m"
+            text_width_neg = c.stringWidth(text_neg, 'Helvetica',7)
+            text_width_pos = c.stringWidth(text_pos, 'Helvetica',7)
+            
+            c.drawString(x_tol_neg - text_width_neg, y_tol_text, text_neg)
+            c.drawString(x_tol_pos, y_tol_text, text_pos)
+            
+        # Cabeçalho do PDF
+        c.setFont("Helvetica-Bold", 18)
+        c.drawCentredString(largura / 2, altura - 3 * cm, "Relatório de Demarcação da Pista")
+        c.setFont("Helvetica", 12)
+        c.drawCentredString(largura / 2, altura - 4 * cm, "Verificação de Taxímetro - Bandeiras 1 e 2")
+        
+        # Desenha a pista da Bandeira 1
+        desenhar_pista(altura - 5 * cm, "Bandeira 1", self.bandeirada1, self.valor_fracao1,
+                        self.comprimento_pista1, self.comprimento_fracao1, self.num_fracoes1,
+                        self.tarifa_estimativa1, self.tolerancia_metros1)
 
-            return y_formula_base - 25
+        # Desenha a pista da Bandeira 2
+        y_pos_bandeira2 = altura - 15 * cm
+        desenhar_pista(y_pos_bandeira2, "Bandeira 2", self.bandeirada2, self.valor_fracao2,
+                        self.comprimento_pista2, self.comprimento_fracao2, self.num_fracoes2,
+                        self.tarifa_estimativa2, self.tolerancia_metros2)
+        
+        # Seção de Dados de Entrada e Resultados em Colunas
+        y_dados = altura - 23 * cm
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(margem_esq, y_dados, "Dados de Entrada e Resultados Detalhados:")
+        y_dados -= 0.8 * cm
 
-        c.setFont("Helvetica-Bold", 16)
-        c.drawCentredString(largura / 2, altura - 2 * cm, "Demarcação de Pista para Verificação de Taxímetro")
+        # Cabeçalhos das colunas
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(margem_esq, y_dados, "Bandeira 1")
+        c.drawString(margem_esq + margem_coluna, y_dados, "Bandeira 2")
+        y_dados -= 0.5 * cm
 
-        y_atual = altura - 3 * cm
-        y_atual = desenhar_pista(
-            y_atual,
-            "Bandeira 1:",
-            self.bandeirada1,
-            self.valor_fracao1,
-            self.comprimento_pista1,
-            self.comprimento_fracao1,
-            self.num_fracoes1,
-            self.tarifa_estimativa1,
-            self.tolerancia_metros1
-        )
-
-        desenhar_pista(
-            y_atual,
-            "Bandeira 2:",
-            self.bandeirada2,
-            self.valor_fracao2,
-            self.comprimento_pista2,
-            self.comprimento_fracao2,
-            self.num_fracoes2,
-            self.tarifa_estimativa2,
-            self.tolerancia_metros2
-        )
+        # Dados em colunas
+        c.setFont("Helvetica", 10)
+        c.drawString(margem_esq, y_dados, f"Bandeirada: R$ {self.bandeirada1:.2f}")
+        c.drawString(margem_esq + margem_coluna, y_dados, f"Bandeirada: R$ {self.bandeirada2:.2f}")
+        y_dados -= 0.5 * cm
+        
+        c.drawString(margem_esq, y_dados, f"Valor por fração: R$ {self.valor_fracao1:.2f}")
+        c.drawString(margem_esq + margem_coluna, y_dados, f"Valor por fração: R$ {self.valor_fracao2:.2f}")
+        y_dados -= 0.5 * cm
+        
+        c.drawString(margem_esq, y_dados, f"Número de frações: {self.num_fracoes1}")
+        c.drawString(margem_esq + margem_coluna, y_dados, f"Número de frações: {self.num_fracoes2}")
+        y_dados -= 0.5 * cm
+        
+        c.drawString(margem_esq, y_dados, f"Comprimento da fração: {self.comprimento_fracao1:.2f} m")
+        c.drawString(margem_esq + margem_coluna, y_dados, f"Comprimento da fração: {self.comprimento_fracao2:.2f} m")
+        y_dados -= 0.5 * cm
+        
+        c.drawString(margem_esq, y_dados, f"Comprimento total da pista: {self.comprimento_pista1:.2f} m")
+        c.drawString(margem_esq + margem_coluna, y_dados, f"Comprimento total da pista: {self.comprimento_pista2:.2f} m")
+        y_dados -= 0.5 * cm
+        
+        c.drawString(margem_esq, y_dados, f"Tarifa estimada: R$ {self.tarifa_estimativa1:.2f}")
+        c.drawString(margem_esq + margem_coluna, y_dados, f"Tarifa estimada: R$ {self.tarifa_estimativa2:.2f}")
+        y_dados -= 0.5 * cm
+        
+        c.drawString(margem_esq, y_dados, f"Tolerância permitida: ± {self.tolerancia_metros1:.2f} m")
+        c.drawString(margem_esq + margem_coluna, y_dados, f"Tolerância permitida: ± {self.tolerancia_metros2:.2f} m")
+        
+        # Adiciona o endereço no rodapé do PDF
+        if self.endereco:
+            c.setFont("Helvetica", 10)
+            c.drawCentredString(largura / 2, cm, f"Endereço: {self.endereco}")
 
         c.save()
-
-# (AQUI você pode ter a definição das telas VisualPista1, VisualPista2, o gerenciador e o App principal)
+    
+    def mostrar_erro_imagem(self, mensagem):
+        self.resultado_label1.text = f"[color=ff0000]{mensagem}[/color]"
+        self.resultado_label2.text = f"[color=ff0000]{mensagem}[/color]"
+        self.botao_gerar_pdf.disabled = True
 
 
 class TelaVisualPistaBase(Screen):
@@ -392,61 +582,74 @@ class TelaVisualPistaBase(Screen):
         self.canvas_area.canvas.clear()
 
         largura_px = Window.width - 2 * x_inicial
-        escala = largura_px / comprimento_total if comprimento_total else 1
-
+        largura_desenhada = largura_px * 0.9
+        escala = largura_desenhada / comprimento_total if comprimento_total else 1
+        line_thickness = 1.5
+        
         with self.canvas_area.canvas:
-            Color(0.8, 0.8, 0.8, 1)
-            Rectangle(pos=(x_inicial, y_pista - altura_pista / 2), size=(largura_px, altura_pista))
-
-            faixa_offset = altura_pista / 3
-            Color(1, 1, 0, 1)
-            Line(points=[x_inicial, y_pista - faixa_offset, x_inicial + largura_px, y_pista - faixa_offset], width=2)
-            Line(points=[x_inicial, y_pista + faixa_offset, x_inicial + largura_px, y_pista + faixa_offset], width=2)
-
-            Color(0, 0, 0, 1)
-            Line(points=[x_inicial, y_pista, x_inicial + largura_px, y_pista], width=3)
-
-            # Cota comprimento total
-            Color(1, 0, 0, 1)
-            seta_offset = 20
-            y_cota = y_pista + altura_pista / 2 + seta_offset
-            x_final = x_inicial + largura_px
-            Line(points=[x_inicial, y_cota, x_final, y_cota], width=1.5)
-            Line(points=[x_inicial, y_cota - 5, x_inicial, y_cota + 5], width=1.5)
-            Line(points=[x_final, y_cota - 5, x_final, y_cota + 5], width=1.5)
-
-            label_ct = CoreLabel(text=f"{comprimento_total:.2f} m", font_size=14, color=(1, 0, 0, 1))
-            label_ct.refresh()
-            texture = label_ct.texture
-            Rectangle(texture=texture, pos=((x_inicial + x_final) / 2 - texture.size[0] / 2, y_cota + 5), size=texture.size)
-
-            # Cota tolerância
-            y_tol = y_pista - altura_pista / 2 - seta_offset
-            x_centro = (x_inicial + x_final) / 2
-            x_tol_ini = x_centro - tolerancia_m * escala
-            x_tol_fim = x_centro + tolerancia_m * escala
-            Line(points=[x_tol_ini, y_tol, x_tol_fim, y_tol], width=1.5)
-            Line(points=[x_tol_ini, y_tol - 5, x_tol_ini, y_tol + 5], width=1.5)
-            Line(points=[x_tol_fim, y_tol - 5, x_tol_fim, y_tol + 5], width=1.5)
-
-            label_tol = CoreLabel(text=f"± {tolerancia_m:.2f} m", font_size=14, color=(1, 0, 0, 1))
-            label_tol.refresh()
-            Rectangle(texture=label_tol.texture, pos=(x_centro - label_tol.texture.size[0]/2, y_tol - 20), size=label_tol.texture.size)
-
+            # Título da Pista
+            label_titulo = CoreLabel(text=f"{self.name.capitalize().replace('visual', 'Pista ')}", font_size=18, bold=True, color=(0,0,0,1))
+            label_titulo.refresh()
+            Rectangle(texture=label_titulo.texture, pos=((Window.width - label_titulo.texture.size[0]) / 2, y_pista + 150), size=label_titulo.texture.size)
+            
             # Fórmulas
             texto1 = f"Comp. da pista = {num_fracoes} × {comprimento_total/num_fracoes:.2f}"
             texto2 = f"Tarifa estimada = {bandeirada:.2f} + {num_fracoes} × {valor_fracao:.2f}"
 
-            y_formula_2 = y_pista + altura_pista / 2 + 50
-            y_formula_1 = y_formula_2 + 40
-
             label_formula1 = CoreLabel(text=texto1, font_size=14)
             label_formula1.refresh()
-            Rectangle(texture=label_formula1.texture, pos=((x_inicial + x_final)/2 - label_formula1.texture.size[0]/2, y_formula_1), size=label_formula1.texture.size)
+            Rectangle(texture=label_formula1.texture, pos=((x_inicial + largura_px)/2 - label_formula1.texture.size[0]/2, y_pista + 100), size=label_formula1.texture.size)
 
             label_formula2 = CoreLabel(text=texto2, font_size=14)
             label_formula2.refresh()
-            Rectangle(texture=label_formula2.texture, pos=((x_inicial + x_final)/2 - label_formula2.texture.size[0]/2, y_formula_2), size=label_formula2.texture.size)
+            Rectangle(texture=label_formula2.texture, pos=((x_inicial + largura_px)/2 - label_formula2.texture.size[0]/2, y_pista + 70), size=label_formula2.texture.size)
+
+            # Cota comprimento total (ACIMA das fórmulas)
+            Color(1, 0, 0, 1) # Red
+            y_cota = y_pista + 50
+            x_final_desenhado = x_inicial + largura_desenhada
+            Line(points=[x_inicial, y_cota, x_final_desenhado, y_cota], width=line_thickness)
+            Line(points=[x_inicial, y_cota - 5, x_inicial, y_cota + 5], width=line_thickness)
+            Line(points=[x_final_desenhado, y_cota - 5, x_final_desenhado, y_cota + 5], width=line_thickness)
+
+            label_ct = CoreLabel(text=f"{comprimento_total:.2f} m", font_size=14, color=(1, 0, 0, 1))
+            label_ct.refresh()
+            Rectangle(texture=label_ct.texture, pos=((x_inicial + x_final_desenhado) / 2 - label_ct.texture.size[0] / 2, y_cota + 5), size=label_ct.texture.size)
+
+            # Pista
+            Color(0.8, 0.8, 0.8, 1) # Grey
+            y_pista_desenhada = y_cota - 50
+            Rectangle(pos=(x_inicial, y_pista_desenhada - altura_pista / 2), size=(largura_desenhada, altura_pista))
+
+            faixa_offset = altura_pista / 3
+            Color(1, 1, 0, 1) # Yellow
+            Line(points=[x_inicial, y_pista_desenhada - faixa_offset, x_final_desenhado, y_pista_desenhada - faixa_offset], width=line_thickness)
+            Line(points=[x_inicial, y_pista_desenhada + faixa_offset, x_final_desenhado, y_pista_desenhada + faixa_offset], width=line_thickness)
+
+            Color(0, 0, 0, 1) # Black
+            Line(points=[x_inicial, y_pista_desenhada, x_final_desenhado, y_pista_desenhada], width=line_thickness)
+            
+            # Cota tolerância (POSICIONADA NAS EXTREMIDADES DIREITAS DA PISTA)
+            tol_px = tolerancia_m * escala
+            x_final = x_inicial + largura_desenhada
+            x_tol_neg = x_final - tol_px
+            x_tol_pos = x_final + tol_px
+            y_tol_linha = y_pista_desenhada + 10  # Na altura da linha central da pista
+            
+            Color(0, 0, 1, 1) # Blue
+            Line(points=[x_tol_neg, y_tol_linha, x_tol_pos, y_tol_linha], width=line_thickness)
+            Line(points=[x_tol_neg, y_tol_linha - 5, x_tol_neg, y_tol_linha + 5], width=line_thickness)
+            Line(points=[x_tol_pos, y_tol_linha - 5, x_tol_pos, y_tol_linha + 5], width=line_thickness)
+            
+            # Desenha textos de tolerância
+            y_tol_text = y_pista_desenhada - 40 # Nova posição para os textos
+            label_tol_neg = CoreLabel(text=f"-{tolerancia_m:.2f}", font_size=14, color=(0,0,1,1))
+            label_tol_neg.refresh()
+            Rectangle(texture=label_tol_neg.texture, pos=(x_tol_neg - label_tol_neg.texture.size[0]/2, y_tol_text), size=label_tol_neg.texture.size)
+            
+            label_tol_pos = CoreLabel(text=f"+{tolerancia_m:.2f}", font_size=14, color=(0,0,1,1))
+            label_tol_pos.refresh()
+            Rectangle(texture=label_tol_pos.texture, pos=(x_tol_pos - label_tol_pos.texture.size[0]/2, y_tol_text), size=label_tol_pos.texture.size)
 
     def atualizar_desenho(self, num_fracoes, comprimento_total, comprimento_fracao, tolerancia_m, bandeirada=None, valor_fracao=None):
         margem = 40
@@ -459,7 +662,6 @@ class TelaVisualPistaBase(Screen):
 
     def voltar_para_entrada(self, instance):
         self.manager.current = 'entrada'
-
 
 class TelaVisualPista1(TelaVisualPistaBase):
     """Tela de visualização específica para a Bandeira 1."""
@@ -475,15 +677,27 @@ class MeuApp(App):
     Gerencia as diferentes telas do aplicativo.
     """
     def build(self):
-        sm = ScreenManager() # Gerenciador de telas
-        sm.add_widget(TelaInicial(name='inicial')) # Adiciona a tela inicial
-        self.entrada = TelaEntradaDados(name='entrada') # Instancia a tela de entrada de dados
-        self.visual_pista1 = TelaVisualPista1(name='visual1') # Instancia a tela de visualização da pista 1
-        self.visual_pista2 = TelaVisualPista2(name='visual2') # Instancia a tela de visualização da pista 2
+        sm = ScreenManager()
+        sm.add_widget(TelaSplash(name='splash'))
+        sm.add_widget(TelaInicial(name='inicial'))
+        self.entrada = TelaEntradaDados(name='entrada')
+        self.visual_pista1 = TelaVisualPista1(name='visual1')
+        self.visual_pista2 = TelaVisualPista2(name='visual2')
         sm.add_widget(self.entrada)
         sm.add_widget(self.visual_pista1)
         sm.add_widget(self.visual_pista2)
+
+        sm.current = 'splash'
+        Clock.schedule_once(lambda dt: self.mudar_tela(sm), 7)
+
         return sm
+    
+    def on_start(self):
+        # Maximiza a janela na inicialização, após o build ter sido concluído
+        Window.maximize()
+
+    def mudar_tela(self, sm):
+        sm.current = 'inicial'
 
 if __name__ == '__main__':
-    MeuApp().run() # Inicia o aplicativo Kivy
+    MeuApp().run()

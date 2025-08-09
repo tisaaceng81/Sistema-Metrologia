@@ -5,16 +5,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('ibametro.png', '.'), 
-        ('icon.ico', '.'), 
-        ('splash.png', '.')
-    ],
-    hiddenimports=[
-        'requests', 
-        'kivy.garden'
-    ],
-    hookspath=[],
+    datas=[('ibametro.png', '.'), ('splash.png', '.'), ('template.html', '.'), ('roboto.ttf', '.')],
+    hiddenimports=['requests'],
+    hookspath=['.'],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -28,6 +21,7 @@ exe = EXE(
     a.scripts,
     a.binaries,
     a.datas,
+    [],
     name='TaxiPista',
     debug=False,
     bootloader_ignore_signals=False,
@@ -41,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    onefile=True,  # Adicionado para criar um único arquivo executável
+    icon=['icon.ico'],
 )
