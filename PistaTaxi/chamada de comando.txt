@@ -1,0 +1,2 @@
+pyinstaller --onefile --windowed --name="TaxiPista" --icon="icon.ico" --add-data "ibametro.png;." --add-data "splash.png;." --add-data "template.html;." --add-data "roboto.ttf;." --hidden-import="requests" --additional-hooks-dir="." "main.py"
+
